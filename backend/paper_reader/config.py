@@ -11,9 +11,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_API_BASE = "https://open.bigmodel.cn/api/paas/v4"
@@ -33,12 +34,17 @@ _TOML_KEYS = (
     "papers_dir",
     "summaries_dir",
     "proxy",
+    "extra_headers",
 )
 
 
 @dataclass
 class Config:
-    """运行配置。papers_dir / summaries_dir 为 None 时自动探测项目根目录。"""
+    """运行配置。papers_dir / summaries_dir 为 None 时自动探测项目根目录。
+
+    LLM 接入为标准 OpenAI 兼容形态：api_base + api_key + model 三项即可对接
+    任意兼容网关；个别网关要求的专属请求头通过 extra_headers 配置，代码不硬编码。
+    """
 
     api_base: str = DEFAULT_API_BASE
     api_key: str = ""
@@ -48,6 +54,7 @@ class Config:
     papers_dir: Path | None = None
     summaries_dir: Path | None = None
     proxy: str = ""  # LLM 出站代理，如 http://127.0.0.1:10808，空为直连
+    extra_headers: dict[str, str] = field(default_factory=dict)  # 附加请求头
 
 
 def _apply_toml(cfg: Config, path: Path, base: Path | None = None) -> None:
@@ -77,12 +84,27 @@ def _apply_env(cfg: Config) -> None:
         "papers_dir": ("PAPERREADER_PAPERS_DIR",),
         "summaries_dir": ("PAPERREADER_SUMMARIES_DIR",),
         "proxy": ("PAPERREADER_PROXY",),
+        "extra_headers": ("PAPERREADER_EXTRA_HEADERS",),  # JSON 对象字符串
     }
     for key, names in mapping.items():
         for name in names:
             value = os.environ.get(name)
             if value:
-                setattr(cfg, key, Path(value).expanduser() if key.endswith("_dir") else value)
+                if key.endswith("_dir"):
+                    setattr(cfg, key, Path(value).expanduser())
+                elif key == "extra_headers":
+                    try:
+                        parsed = json.loads(value)
+                    except json.JSONDecodeError:
+                        raise ValueError(
+                            f"环境变量 {name} 不是合法 JSON 对象：{value[:80]}"
+                        ) from None
+                    if isinstance(parsed, dict):
+                        cfg.extra_headers = {
+                            str(k): str(v) for k, v in parsed.items()
+                        }
+                else:
+                    setattr(cfg, key, value)
                 break
     if isinstance(cfg.max_chars, str):
         cfg.max_chars = int(cfg.max_chars)
@@ -144,4 +166,5 @@ def config_asdict(cfg: Config) -> dict:
         "papers_dir": str(cfg.papers_dir or ""),
         "summaries_dir": str(cfg.summaries_dir or ""),
         "proxy": cfg.proxy or "（直连）",
+        "extra_headers": {k: mask_key(v) for k, v in (cfg.extra_headers or {}).items()},
     }

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -16,14 +17,13 @@ from openai import OpenAI
 
 from .config import Config
 from .extract import ExtractionError, extract_text
-from .summarizer import build_client, strip_reasoning
+from .summarizer import build_client, call_llm, strip_reasoning
 
 CHAT_SYSTEM_TEMPLATE = """你是一位资深的科研论文阅读助手，正在与用户就一篇论文进行深入讨论。
 请基于下面提供的论文资料回答问题：回答准确、简洁、有依据；资料中没有的信息请明确说明，
 不要编造。涉及论文之外的知识时，可结合你的专业知识作答，但需指出这不是论文原文内容。
 回答使用中文（专有名词、论文名称、数据集与指标名可保留英文），支持 Markdown 格式。
-引用论文原文作为依据时，尽量在对应句子末尾标注页码，格式如 [p.3]
-（页码取自资料中的「【第 N 页】」标记）；无法确定页码时不要标注，绝不要编造页码。
+不要在回答中输出 [p.N] 之类的页码标注。
 
 === 论文资料开始 ===
 {context}
@@ -67,21 +67,23 @@ def build_context(
 
 
 DIGEST_CLIPS_INSTRUCTION = """你是一位论文阅读助手。下面是用户阅读一篇论文时逐条保存的对话摘录（问 + 答）。
-请把它们提炼归纳成一篇精炼的 Markdown 笔记：按主题重新组织分点，合并重复与相近的内容，
-保留关键数据、结论与重要细节；是对内容的归纳提炼，而不是逐条复述问答。
-开头第一行写 `## 对话整理`，第二行写斜体的整理日期（使用系统消息中提供的整理日期，不要自己编造）。
+请把它们提炼归纳成一篇精炼的 Markdown 笔记：
+- 以主题为线索组织章节，合并重复与相近的内容，保留关键数据、结论与重要细节；是对内容的归纳提炼，而不是逐条复述问答。
+- 在每个章节标题后用括号注明来源，如「### 实验设置（来源：对话摘录）」；本文全部来自对话，统一标注「（来源：对话摘录）」。
+- 开头第一行写 `## 阅读笔记`，第二行写斜体的整理日期（使用系统消息中提供的整理日期，不要自己编造）；除此之外不要写「本笔记整理自…」之类的元说明段落。
 """
 
-MERGE_DIGEST_INSTRUCTION = """你是一位论文阅读助手。用户阅读一篇论文时已有一篇整理笔记，之后又追加保存了新的对话摘录（问 + 答）。
-请把「已有的整理笔记」与「新增的对话摘录」融合重写成一篇更完整、浑然一体的 Markdown 笔记：
-以主题为线索重新组织结构，把新摘录中的信息点自然合并进对应主题，去重、互补、修正；
-不要机械拼接两部分，也不要逐条复述对话；保留全部关键数据与结论。
-开头第一行写 `## 对话整理`，第二行写斜体的整理日期（使用系统消息中提供的整理日期，不要自己编造）。
+MERGE_DIGEST_INSTRUCTION = """你是一位论文阅读助手。用户阅读一篇论文时已有一些笔记，其中可能包含：之前的整理笔记、手写的想法，之后又追加保存了新的对话摘录（问 + 答）。
+请把全部内容融合重写成一篇统一、完整的阅读笔记：
+- 以主题为线索组织章节，把各处信息点自然合并进对应主题，去重、互补、修正；不要机械拼接，也不要逐条复述对话；保留全部关键数据与结论。
+- 在每个章节标题后用括号注明该部分内容的来源，如「### 核心方法（来源：对话摘录 + 手写笔记）」「### 局限性（来源：手写笔记）」；来源可组合标注。
+- 开头第一行写 `## 阅读笔记`，第二行写斜体的整理日期（使用系统消息中提供的整理日期，不要自己编造）；除此之外不要写「本笔记整理自…」之类的元说明段落。
+- 若「新增的对话摘录」为空，则把已有笔记本身重新整理成一篇更完整、结构更清晰的笔记，不要虚构新内容。
 """
 
 REDIGEST_INSTRUCTION = """你是一位论文阅读助手。请重新整理下面这篇论文笔记：
-更精炼、结构更清晰（Markdown 分点 / 小节），保留全部关键信息与数据，不要新增内容、不要编造；
-保留原第一行标题，第二行写斜体的整理日期（使用系统消息中提供的整理日期）。
+更精炼、结构更清晰（Markdown 分点 / 小节），保留全部关键信息、数据与各章节的来源标注（如「（来源：对话摘录）」），
+不要新增内容、不要编造；保留原第一行标题，第二行写斜体的整理日期（使用系统消息中提供的整理日期）。
 注意：笔记正文中不要出现「整理日期」这几个字以外的任何元信息。
 """
 
@@ -109,7 +111,7 @@ def digest_notes(
         },
     ]
     try:
-        resp = client.chat.completions.create(model=cfg.model, messages=messages)
+        resp = call_llm(client, model=cfg.model, messages=messages)
     except Exception as e:  # noqa: BLE001
         raise ChatError(f"调用 LLM API 失败: {e}") from e
     out = (resp.choices[0].message.content or "").strip()
@@ -168,7 +170,7 @@ def chat_reply(
         client = build_client(cfg)
 
     try:
-        resp = client.chat.completions.create(model=cfg.model, messages=messages)
+        resp = call_llm(client, model=cfg.model, messages=messages)
     except Exception as e:  # noqa: BLE001
         raise ChatError(f"调用 LLM API 失败: {e}") from e
 
@@ -183,3 +185,69 @@ def chat_reply(
             "模型返回内容为空" + ("（仅输出了思考过程，请重试）" if reasoning else "，请重试")
         )
     return content
+
+
+RELATED_QA_INSTRUCTION = """你是一位论文阅读助手。用户刚读完一篇论文中对某个问题的回答，希望继续深入。
+请结合论文内容与刚才的问答，提出 3 个用户最可能想继续追问的问题：
+- 问题要具体、有信息量，指向论文中的方法细节、实验数据、对比、局限或延伸思考；
+- 不要与刚才已回答的内容重复，也不要过于宽泛；
+- 每个问题不超过 30 个字，中文（专有名词可保留英文）。
+只输出一个 JSON 数组（3 个字符串），不要任何解释或代码块标记。"""
+
+
+def generate_related_questions(
+    pdf_path: Path | str,
+    cfg: Config,
+    question: str,
+    answer: str,
+    client: OpenAI | None = None,
+) -> list[str]:
+    """基于论文上下文与最近一轮问答，生成 3 个关联追问；失败时静默返回空列表。"""
+    try:
+        pdf_path = Path(pdf_path)
+        extracted = extract_text(pdf_path, max_chars=20_000)
+        context = extracted.text
+    except ExtractionError:
+        context = ""
+    if client is None:
+        client = build_client(cfg)
+    messages = [
+        {"role": "system", "content": RELATED_QA_INSTRUCTION},
+        {
+            "role": "user",
+            "content": (
+                f"=== 论文节选开始 ===\n{context or '（无法提取论文文本）'}\n=== 论文节选结束 ===\n\n"
+                f"=== 刚才的问答开始 ===\n用户：{question[:2000]}\n\n回答：{answer[:4000]}\n=== 刚才的问答结束 ==="
+            ),
+        },
+    ]
+    try:
+        resp = call_llm(client, model=cfg.model, messages=messages)
+        text = (resp.choices[0].message.content or "").strip()
+    except Exception:  # noqa: BLE001 —— 关联问题是增强功能，失败静默降级
+        return []
+    return _parse_related_questions(text)
+
+
+def _parse_related_questions(text: str) -> list[str]:
+    """解析模型输出的 JSON 数组（容忍围栏/前后文本/尾逗号），最多 3 条、每条截断。"""
+    text = re.sub(r"^```[a-zA-Z]*\s*", "", text.strip())
+    text = re.sub(r"\s*```\s*$", "", text)
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end <= start:
+        return []
+    candidate = re.sub(r",\s*([\]])", r"\1", text[start : end + 1])
+    try:
+        data = json.loads(candidate)
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(data, list):
+        return []
+    out: list[str] = []
+    for item in data:
+        q = str(item).strip()
+        if q:
+            out.append(q[:50])
+        if len(out) >= 3:
+            break
+    return out

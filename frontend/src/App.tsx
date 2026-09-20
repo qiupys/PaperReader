@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import ChatPanel from "./ChatPanel";
 import NotesPanel from "./NotesPanel";
-import { CiteMarkdown } from "./Cite";
+import { Markdown } from "./Markdown";
 import { IconDownload } from "./icons";
 import {
   deleteSummary,
@@ -11,7 +11,7 @@ import {
   importPaper,
   paperUrl,
   searchFulltext,
-  streamSummary,
+  generateSummary,
   updatePaperMeta,
 } from "./api";
 import { downloadText, formatDate, formatSize, parseSummary } from "./summary";
@@ -24,7 +24,7 @@ import type {
 
 const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: "all", label: "全部" },
-  { key: "starred", label: "★ 星标" },
+  { key: "starred", label: "收藏" },
   { key: "read", label: "已读" },
   { key: "unread", label: "未读" },
 ];
@@ -176,8 +176,6 @@ export default function App() {
       return next;
     });
   }, []);
-  /** 生成 Summary 时的实时输出预览（原始增量，让等待可见）。 */
-  const [genPreview, setGenPreview] = useState("");
   /** 笔记页整理/重整状态按论文跟踪：切论文再切回不会误判为空闲、避免重复整理。 */
   const [notesBusy, setNotesBusy] = useState<Record<string, string>>({});
   const setNotesBusyFor = useCallback((stem: string, key: string | null) => {
@@ -192,21 +190,25 @@ export default function App() {
       return { ...prev, [stem]: key };
     });
   }, []);
-  /** 页码引用跳转：点击 [p.N] 后 PDF iframe 定位到对应页。 */
-  const [pdfPage, setPdfPage] = useState<number | null>(null);
-  const jumpToPage = useCallback((page: number) => {
-    setPdfPage(page);
-    setTab("split");
-  }, []);
   const [filter, setFilter] = useState<FilterKey>("all");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  /** 当前选中论文的 ref：异步回调里判断「结果该归属哪篇论文」，防止跨论文覆盖视图。 */
+  const selectedRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
   const [summaryMd, setSummaryMd] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("split");
   const [theme, setTheme] = useState<"light" | "dark">(themeFromStorage);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingSummary, setLoadingSummary] = useState(false);
-  const [generating, setGenerating] = useState(false);
+  /** 正在生成 Summary 的论文 stem；null 表示空闲。按论文跟踪，不顶掉其他论文的 summary。 */
+  const [generatingStem, setGeneratingStem] = useState<string | null>(null);
+  const generatingStemRef = useRef<string | null>(null);
+  useEffect(() => {
+    generatingStemRef.current = generatingStem;
+  }, [generatingStem]);
   const [marking, setMarking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fulltext, setFulltext] = useState<FulltextResult[]>([]);
@@ -250,12 +252,15 @@ export default function App() {
     setSummaryMd(null);
     try {
       const data = await fetchSummary(stem);
+      // 期间切换了论文：旧结果只放弃展示，不污染当前论文的视图
+      if (selectedRef.current !== stem) return;
       setSummaryMd(data.read ? data.markdown : null);
       setError(null);
     } catch (e) {
+      if (selectedRef.current !== stem) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoadingSummary(false);
+      if (selectedRef.current === stem) setLoadingSummary(false);
     }
   }, []);
 
@@ -263,29 +268,49 @@ export default function App() {
     (stem: string) => {
       setSelected(stem);
       setTab("split");
-      setPdfPage(null);
       void loadSummary(stem);
     },
     [loadSummary]
   );
 
   const generate = async (paper: Paper) => {
-    setGenerating(true);
+    // 生成状态按论文跟踪：只影响该论文自己的视图，其他论文照常显示已有 summary。
+    // 非流式一次性生成：等待期间显示转圈与进度提示，完成后由服务端落盘并返回成品。
+    setGeneratingStem(paper.stem);
     setError(null);
-    setGenPreview("");
     try {
-      const result = await streamSummary(paper.stem, paper.read, (t) =>
-        setGenPreview((p) => (p + t).slice(-4000))
-      );
-      setSummaryMd(result.markdown);
+      const result = await generateSummary(paper.stem, paper.read);
+      // 期间切换了论文：结果已由服务端落盘，不覆盖当前论文的视图
+      if (selectedRef.current === paper.stem) {
+        setSummaryMd(result.markdown);
+      }
       await refreshList();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (selectedRef.current === paper.stem) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setGenerating(false);
-      setGenPreview("");
+      setGeneratingStem((cur) => (cur === paper.stem ? null : cur));
     }
   };
+
+  /** 对话页先摘要后回答：论文未读时先生成 Summary（含并发/重复防护），完成后返回。 */
+  const ensureSummary = useCallback(
+    async (stem: string) => {
+      const paper = papers.find((p) => p.stem === stem);
+      if (!paper) throw new Error("找不到这篇论文");
+      if (paper.read) return;
+      if (generatingStem === stem) {
+        // 该论文已在生成中：等待其完成（轮询直到状态清空）
+        while (generatingStemRef.current === stem) {
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        return;
+      }
+      await generate(paper);
+    },
+    [papers, generatingStem]
+  );
 
   const markUnread = async (paper: Paper) => {
     if (!window.confirm("删除对应的 summary，将这篇论文标记为未读？")) return;
@@ -376,7 +401,7 @@ export default function App() {
         (p.title ?? "").toLowerCase().includes(kw)
       );
     });
-    // 星标优先，其余保持原有的修改时间倒序
+    // 收藏优先，其余保持原有的修改时间倒序
     return [...list].sort(
       (a, b) =>
         Number(metas[b.stem]?.starred ?? false) -
@@ -536,6 +561,18 @@ export default function App() {
                         {p.stem} · {formatSize(p.size)} · {formatDate(p.mtime)}
                       </span>
                     </span>
+                    {generatingStem === p.stem && (
+                      <span
+                        className="paper-item-generating"
+                        title="AI 正在生成这篇论文的 Summary…"
+                      />
+                    )}
+                    {notesBusy[p.stem] && (
+                      <span
+                        className="paper-item-digesting"
+                        title="AI 正在整理这篇论文的笔记…"
+                      />
+                    )}
                     {pendingStems[p.stem] && (
                       <span
                         className="paper-item-pending"
@@ -597,12 +634,11 @@ export default function App() {
                 <div className="guide-title">2 · 生成与阅读</div>
                 <ul>
                   <li>
-                    从左侧选择一篇论文，点工具栏 ↻ 生成
-                    Summary（思考型模型，可能需要几分钟；生成时可实时看到 Agent 的输出进度）
+                    从左侧选择一篇论文，点工具栏左侧第一个按钮（刷新状图标）一次性生成
+                    Summary（思考型模型通常需要几分钟；期间可切看其他论文，生成照常完成）
                   </li>
                   <li>「对照阅读」左边是原文 PDF，右边是 Summary 卡片，可边读边看</li>
-                  <li>Summary 内容里的 [p.页码] 可点击，左侧 PDF 会跳到对应页</li>
-                  <li>Summary 标题上方有「⬇ 导出 Markdown」按钮，可下载 .md 文件</li>
+                  <li>Summary 标题上方有「导出 Markdown」按钮，可下载 .md 文件</li>
                   <li>已读 = summaries/ 下存在对应 markdown</li>
                 </ul>
               </div>
@@ -620,7 +656,7 @@ export default function App() {
                     <span className="guide-icon">
                       <IconStar filled={false} />
                     </span>
-                    星标论文（列表置顶显示 ★）
+                    收藏论文（列表置顶显示 ★）
                   </div>
                   <div className="guide-row">
                     <span className="guide-icon">
@@ -642,22 +678,25 @@ export default function App() {
                 <ul>
                   <li>
                     「对话」：就论文内容与 AI
-                    多轮追问，回答实时流式显示；回答中的 [p.页码]
-                    可点击跳到 PDF 对应页
+                    多轮追问，回答实时流式显示。未读论文直接提问时，AI
+                    会先生成 Summary 再回答；回答后还会给出可点击的「继续追问」建议
                   </li>
                   <li>
-                    「笔记」：对话里点「＋ 存入笔记」收集摘录，一键整理成笔记；可导出全部笔记为
+                    「笔记」：对话里点「＋ 存入笔记」收集摘录，也可点「＋
+                    写点自己的想法」手写卡片；一键融合整理成统一笔记，章节会注明来源；可导出全部笔记为
                     .md 文件
                   </li>
                   <li>
-                    侧栏论文右侧的小转圈 = AI
-                    正在后台回答这篇论文的提问（切去别的页面回答照常完成）
+                    侧栏论文右侧的小转圈：蓝色 = AI
+                    正在后台回答这篇论文的提问，橙色 = AI
+                    正在整理这篇论文的笔记，绿色 = AI
+                    正在生成这篇论文的 Summary（切去别的页面都会照常完成）
                   </li>
                   <li>
                     顶部搜索框：搜文件名 / 标题，输入 2
                     字以上还会全文搜索所有 Summary
                   </li>
-                  <li>右上角 🌙 / ☀：深色 / 浅色模式切换</li>
+                  <li>右上角的月亮 / 太阳图标：深色 / 浅色模式切换</li>
                 </ul>
               </div>
             </div>
@@ -672,7 +711,7 @@ export default function App() {
                     {current.read ? "✅ 已读" : "⬜ 未读"}
                   </span>
                   {currentMeta.starred && (
-                    <span className="badge starred">★ 已星标</span>
+                    <span className="badge starred">★ 已收藏</span>
                   )}
                 </div>
                 <div className="detail-meta">
@@ -691,22 +730,24 @@ export default function App() {
                   <div className="icon-group">
                     <button
                       className="icon-btn"
-                      disabled={generating}
+                      disabled={generatingStem !== null}
                       onClick={() => void generate(current)}
                       title={
-                        generating
+                        generatingStem === current.stem
                           ? "正在生成…"
-                          : current.read
-                            ? "重新生成 Summary"
-                            : "生成 Summary"
+                          : generatingStem !== null
+                            ? "已有论文正在生成 Summary，请稍候"
+                            : current.read
+                              ? "重新生成 Summary"
+                              : "生成 Summary"
                       }
                     >
-                      <IconRefresh spinning={generating} />
+                      <IconRefresh spinning={generatingStem === current.stem} />
                     </button>
                     <button
                       className={`icon-btn${currentMeta.starred ? " starred" : ""}`}
                       onClick={() => void toggleStar(current)}
-                      title={currentMeta.starred ? "取消星标" : "星标这篇论文"}
+                      title={currentMeta.starred ? "取消收藏" : "收藏这篇论文"}
                     >
                       <IconStar filled={currentMeta.starred} />
                     </button>
@@ -730,7 +771,7 @@ export default function App() {
                       </button>
                     )}
                   </div>
-                  {generating && (
+                  {generatingStem === current.stem && (
                     <span className="toolbar-hint">
                       Agent 正在阅读论文并思考…（思考型模型，可能需要几分钟）
                     </span>
@@ -756,20 +797,18 @@ export default function App() {
                   <iframe
                     key={current.stem}
                     className="pdf-frame split-pdf"
-                    src={
-                      paperUrl(current.stem, "/pdf") +
-                      (pdfPage ? `#page=${pdfPage}` : "")
-                    }
+                    src={paperUrl(current.stem, "/pdf")}
                     title={`PDF 原文：${current.stem}`}
                   />
                   <div className="split-right">
-                    {generating ? (
+                    {generatingStem === current.stem ? (
                       <div className="placeholder">
                         <div className="gen-head">
-                          <span className="spinner" /> Agent 正在阅读论文并思考…（实时输出如下）
+                          <span className="spinner" /> Agent
+                          正在通读论文并撰写结构化 Summary…
                         </div>
-                        <div className="gen-preview">
-                          <pre>{genPreview || "正在连接模型…"}</pre>
+                        <div className="gen-progress">
+                          思考型模型通常需要几分钟，请耐心等待；期间可切换查看其他论文，生成会照常完成。
                         </div>
                       </div>
                     ) : loadingSummary ? (
@@ -804,15 +843,16 @@ export default function App() {
                           >
                             <h3>{s.heading}</h3>
                             <div className="section-body">
-                              <CiteMarkdown text={s.body} onCite={jumpToPage} />
+                              <Markdown text={s.body} />
                             </div>
                           </section>
                         ))}
                       </>
                     ) : (
                       <div className="placeholder card">
-                        还没有 Summary。点击上方「生成 Summary」让 AI 通读这篇论文，
-                        之后这里会与原文对照展示。
+                        还没有 Summary。点上方「生成 Summary」让 AI
+                        通读这篇论文，或直接到「对话」页提问——AI
+                        会先生成 Summary 再回答你的问题。
                       </div>
                     )}
                   </div>
@@ -824,8 +864,8 @@ export default function App() {
                   hasSummary={current.read}
                   pending={!!pendingStems[current.stem]}
                   onPending={setPending}
-                  onCitePage={jumpToPage}
                   onSaveClip={(question, answer) => saveClip(current.stem, question, answer)}
+                  onEnsureSummary={ensureSummary}
                 />
               </section>
 
@@ -836,7 +876,6 @@ export default function App() {
                   busyKey={notesBusy[current.stem] ?? null}
                   onBusy={setNotesBusyFor}
                   onPatch={(patch) => void patchMeta(current.stem, patch)}
-                  onCitePage={jumpToPage}
                 />
               </section>
             </div>

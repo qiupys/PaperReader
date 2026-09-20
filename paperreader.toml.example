@@ -3,14 +3,21 @@
 # 或放到 ~/.config/paperreader/config.toml。
 # 优先级：环境变量 > 项目 paperreader.toml > 用户配置 > 默认值。
 
-# OpenAI 兼容 API（默认为智谱 GLM 开放平台）
+# LLM 接入为标准 OpenAI 兼容三件套：换任何网关只需改这三行。
+# 示例：智谱开放平台（默认）
 api_base = "https://open.bigmodel.cn/api/paas/v4"
 api_key = "sk-..."
 model = "glm-4.5"
+# model 必须与所选网关的模型 ID 一致（如 OpenRouter 为 "z-ai/glm-4.6" 之类的完整 ID）。
 
 # 出站访问 LLM API 使用的 HTTP 代理（直连可访问时留空即可）
 # 示例：proxy = "http://127.0.0.1:10808"
 proxy = ""
+
+# 附加请求头（可选，TOML 表；网关有特殊要求时才需要）。
+# OpenCode 网关的会话头会按域名自动附加，无需在此配置。
+# [extra_headers]
+# "X-Custom-Auth" = "xxx"
 
 # 送入 LLM 的论文文本最大字符数（超出时保留首尾、截断中部）
 max_chars = 200000

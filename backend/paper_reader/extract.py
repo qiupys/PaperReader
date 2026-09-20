@@ -1,7 +1,7 @@
 """PDF 文本提取（基于 pypdf）。
 
 提取结果带「【第 N 页】」分页标记：页码与 PDF 阅读器页码一致（1 起），
-供 LLM 在回答中标注 [p.N] 引用，前端据此跳转到 PDF 对应页。
+为 LLM 提供原文的分页结构参照。
 """
 
 from __future__ import annotations

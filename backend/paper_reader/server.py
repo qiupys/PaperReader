@@ -18,6 +18,7 @@ from .chat import (
     build_chat_messages,
     chat_reply,
     digest_notes,
+    generate_related_questions,
 )
 from .config import Config, load_config
 from .extract import ExtractionError, extract_text
@@ -25,8 +26,6 @@ from .library import PaperInfo, find_paper, scan
 from .summarizer import (
     SummarizeError,
     build_client,
-    parse_summary,
-    render_markdown,
     strip_reasoning,
     summarize_pdf,
     write_summary,
@@ -54,9 +53,15 @@ class ChatRequest(BaseModel):
     history: list[ChatHistoryItem] = Field(default_factory=list)
 
 
+class RelatedQuestionsRequest(BaseModel):
+    question: str = Field(min_length=1)
+    answer: str = Field(min_length=1)
+
+
 class PaperMetaUpdate(BaseModel):
     starred: bool | None = None
     note: str | None = None
+    notes: list[dict] | None = None  # 手写笔记卡片（多条，可编辑删除）
     clips: list[dict] | None = None
     digests: list[dict] | None = None
 
@@ -197,73 +202,10 @@ def _sse(payload: dict) -> str:
 
 @router.post("/papers/{stem:path}/summarize/stream")
 def summarize_stream(stem: str, force: bool = False):
-    """流式生成 Summary：SSE 推送增量文本，结束时返回解析渲染后的完整 markdown。"""
-    info = _paper_or_404(stem)
-    if info.read and not force:
-        raise HTTPException(status_code=409, detail="summary 已存在（force=true 重新生成）")
-    cfg = load_config()
-    try:
-        extracted = extract_text(info.pdf_path, max_chars=cfg.max_chars)
-    except ExtractionError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
-
-    from .summarizer import SYSTEM_PROMPT, build_user_prompt
-
-    client = build_client(cfg)
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": build_user_prompt(extracted.text, info.pdf_path.name),
-        },
-    ]
-
-    def gen():
-        try:
-            stream = client.chat.completions.create(
-                model=cfg.model, messages=messages, stream=True
-            )
-            content_parts: list[str] = []
-            reasoning_parts: list[str] = []
-            for chunk in stream:
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                text = getattr(delta, "content", None) or ""
-                reasoning = getattr(delta, "reasoning_content", None) or (
-                    (delta.model_extra or {}).get("reasoning_content")
-                    if getattr(delta, "model_extra", None)
-                    else None
-                )
-                if reasoning:
-                    reasoning_parts.append(reasoning)  # 思考过程仅存档，不推送给前端
-                if text:
-                    content_parts.append(text)
-                    yield _sse({"type": "delta", "text": text})
-            parsed = parse_summary("".join(content_parts))
-            markdown = render_markdown(
-                parsed,
-                reasoning="".join(reasoning_parts) or None,
-                model=cfg.model,
-                source_pdf=info.pdf_path.name,
-            )
-            write_summary(info.summary_path, markdown)
-            yield _sse(
-                {
-                    "type": "done",
-                    "stem": info.stem,
-                    "read": True,
-                    "title": parsed.title,
-                    "markdown": strip_reasoning(markdown),
-                }
-            )
-        except SummarizeError as e:
-            yield _sse({"type": "error", "message": str(e)})
-        except Exception as e:  # noqa: BLE001
-            yield _sse({"type": "error", "message": f"生成失败：{e}"})
-
-    return StreamingResponse(
-        gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
+    """已废弃：Summary 生成改为非流式（POST /summarize）。"""
+    raise HTTPException(
+        status_code=410,
+        detail="Summary 已改为一次性生成（非流式），请使用 POST /papers/{stem}/summarize",
     )
 
 
@@ -357,6 +299,17 @@ def chat_stream(stem: str, body: ChatRequest):
     )
 
 
+@router.post("/papers/{stem:path}/related-questions")
+def related_questions(stem: str, body: RelatedQuestionsRequest) -> dict:
+    """基于论文上下文与最近一轮问答生成关联追问（增强功能，失败返回空列表）。"""
+    info = _paper_or_404(stem)
+    cfg = load_config()
+    questions = generate_related_questions(
+        info.pdf_path, cfg, question=body.question, answer=body.answer
+    )
+    return {"stem": info.stem, "questions": questions}
+
+
 @router.get("/meta")
 def get_metas() -> dict:
     """全部论文元信息（星标 / 笔记），key 为 stem。"""
@@ -366,16 +319,18 @@ def get_metas() -> dict:
 
 @router.put("/papers/{stem:path}/meta")
 def update_meta(stem: str, body: PaperMetaUpdate) -> dict:
-    """更新论文元信息：星标、手写笔记、对话摘录（clips）、AI 整理（digests）。"""
+    """更新论文元信息：收藏、手写笔记卡片、对话摘录（clips）、AI 整理（digests）。"""
     info = _paper_or_404(stem)
     cfg = load_config()
     metas = _load_metas(cfg)
     entry = metas.get(info.stem) if isinstance(metas.get(info.stem), dict) else {}
     clips = entry.get("clips") if isinstance(entry.get("clips"), list) else []
     digests = entry.get("digests") if isinstance(entry.get("digests"), list) else []
+    notes = entry.get("notes") if isinstance(entry.get("notes"), list) else []
     entry = {
         "starred": bool(entry.get("starred")),
         "note": str(entry.get("note") or ""),
+        "notes": notes,
         "clips": clips,
         "digests": digests,
     }
@@ -383,6 +338,8 @@ def update_meta(stem: str, body: PaperMetaUpdate) -> dict:
         entry["starred"] = body.starred
     if body.note is not None:
         entry["note"] = body.note
+    if body.notes is not None:
+        entry["notes"] = body.notes
     if body.clips is not None:
         entry["clips"] = body.clips
     if body.digests is not None:

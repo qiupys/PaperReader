@@ -324,16 +324,29 @@ body,
   font-size: 13px;
   margin-top: 1px;
 }
-/* 侧栏：该论文有正在后台进行的对话请求 */
-.paper-item-pending {
+/* 侧栏三个状态转圈：结构统一，仅颜色不同（蓝=对话回答 / 橙=笔记整理 / 绿=Summary 生成） */
+.paper-item-pending,
+.paper-item-digesting,
+.paper-item-generating {
   flex: none;
   width: 12px;
   height: 12px;
   margin-top: 2px;
-  border: 2px solid var(--accent-soft);
-  border-top-color: var(--accent);
+  border: 2px solid transparent;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+.paper-item-pending {
+  border-color: rgba(37, 99, 235, 0.28);
+  border-top-color: #2563eb;
+}
+.paper-item-digesting {
+  border-color: rgba(217, 119, 6, 0.28);
+  border-top-color: #d97706;
+}
+.paper-item-generating {
+  border-color: rgba(22, 163, 74, 0.28);
+  border-top-color: #16a34a;
 }
 .dot {
   width: 8px;
@@ -974,6 +987,19 @@ body,
 .notes-state.error {
   color: var(--danger);
 }
+.notes-state.staged {
+  color: #d97706;
+}
+/* 手写笔记卡片组：标题行右侧放「＋ 写点自己的想法」 */
+.note-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.note-card.manual {
+  border-left: 3px solid var(--star, #f59e0b);
+}
 .notes-input {
   flex: 1;
   width: 100%;
@@ -1382,19 +1408,7 @@ body,
   }
 }
 
-/* ---- 页码引用 / 流式生成 ---- */
-.cite-link {
-  color: var(--accent);
-  text-decoration: underline dotted;
-  text-underline-offset: 2px;
-  cursor: pointer;
-  font-size: 0.82em;
-  padding: 0 1px;
-  font-weight: 600;
-}
-.cite-link:hover {
-  text-decoration-style: solid;
-}
+/* ---- 流式生成 ---- */
 .summary-tools {
   display: flex;
   justify-content: flex-end;
@@ -1408,21 +1422,52 @@ body,
   font-size: 13px;
   margin-bottom: 10px;
 }
-.gen-preview {
+.gen-progress {
   margin-top: 6px;
-  border: 1px solid var(--border);
+  border: 1px dashed var(--border);
   border-radius: 10px;
   background: var(--bg-panel);
-  max-height: 260px;
-  overflow: auto;
-  padding: 10px 12px;
-}
-.gen-preview pre {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.7;
   color: var(--text-faint);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+/* 对话页：先生成 Summary 的状态横幅 */
+.chat-status-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 14px 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--accent-soft);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  color: var(--accent);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.chat-status-banner .spinner {
+  flex: none;
+}
+/* 对话页：回答后的关联追问建议 */
+.chat-followups {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 10px 44px;
+}
+.chat-followups-label {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.chat-followups-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.chat-followups-pending .spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 2px;
 }

@@ -12,14 +12,13 @@
 |---|---|
 | 📥 URL 一键导入 | 粘贴 arXiv / PDF 链接自动下载入库（`/abs/` 链接自动转 PDF 直链；重名 409、非 PDF 422） |
 | 📄 对照阅读 | 左侧内嵌 PDF 原文、右侧分章节彩色卡片式 Summary |
-| 🤖 AI Summary | 摘要 / 核心技术方案 / 实验效果 / 结论 / **Agent 思考**；生成过程实时流式预览 |
-| 💬 流式对话 | 基于论文全文的多轮问答，回答打字机式实时显示；按论文跟踪进行中状态（切换论文/页签不丢） |
-| 🔢 页码引用 | 对话、Summary 与笔记中的 `[p.N]` 可点击，PDF 自动跳到对应页（提取文本带分页标记） |
-| 🗂 对话式笔记 | 回答一键存为摘录 → AI 将「已有笔记 + 新摘录」融合整理成一篇；可整篇重新整理；自动清空已整理摘录 |
-| ✎ 手写笔记 | Markdown 手写区，停顿自动保存，可与摘录一起导出 |
+| 🤖 AI Summary | 摘要 / 核心技术方案 / 实验效果 / 结论 / **Agent 思考**；一次性生成（非流式），解析失败自动修复，杜绝空章节 |
+| 💬 流式对话 | 基于论文全文的多轮问答，回答打字机式实时显示；未读论文直接提问会先生成 Summary 再回答，回答后给出可点击的关联追问 |
+| 🗂 对话式笔记 | 回答一键存为摘录 → AI 将「已有笔记 + 新摘录」融合整理成一篇（章节注明来源）；可整篇重新整理；整理完成后自动清空摘录与手写笔记卡片 |
+| ✎ 手写笔记 | 卡片式手写想法：多条、可编辑、可删除；草稿输入即自动暂存，点「保存」生成卡片 |
 | ⬇ 一键导出 | Summary / 全部笔记分别导出为 `.md` 文件 |
 | 🔍 全文搜索 | 输入 2 字以上自动跨所有 Summary 全文检索，命中关键词高亮 |
-| ⭐ 星标 / 已读 | 全部 / ★ 星标 / 已读 / 未读 筛选，星标置顶 |
+| ⭐ 收藏 / 已读 | 全部 / 收藏 / 已读 / 未读 筛选，收藏置顶 |
 | 🌙 深色模式 | 浅色 / 深色主题一键切换 |
 
 > 思考型模型的「原始推理过程」只写入 `summaries/*.md` 存档，Web 界面与对话均不展示（API 返回前已剥离）。
@@ -46,7 +45,7 @@ model    = "glm-4.5"        # 建议思考型模型，可捕获推理过程
 proxy    = ""               # 可选：出站代理，如 "http://127.0.0.1:10808"
 ```
 
-也可用环境变量：`PAPERREADER_API_KEY` / `PAPERREADER_API_BASE` / `PAPERREADER_MODEL`。
+也可用环境变量：`PAPERREADER_API_KEY` / `PAPERREADER_API_BASE` / `PAPERREADER_MODEL`（网关特殊请求头可用 `PAPERREADER_EXTRA_HEADERS`，JSON 格式）。
 配置完成后用 `uv run paper config` 检查（Key 已脱敏显示）。
 
 ### 3. 前端
@@ -95,9 +94,9 @@ backend/                   # Python：提取 / 生成 / 对话 / CLI / API 服�
 frontend/                  # TypeScript + React（Vite）
 └── src/
     ├── App.tsx            # 布局 / 侧栏 / 对照阅读 / 导入 / 搜索 / 主题
-    ├── ChatPanel.tsx      # 流式对话（页码引用跳转、状态按论文跟踪）
+    ├── ChatPanel.tsx      # 流式对话（先摘要后回答、关联追问、状态按论文跟踪）
     ├── NotesPanel.tsx     # 笔记：已整理 / 摘录 / 手写 / 导出
-    ├── Cite.tsx           # [p.N] 页码引用渲染与跳转
+    ├── Markdown.tsx       # 通用 Markdown 渲染（对话 / Summary / 笔记共用）
     ├── api.ts             # REST + SSE 客户端
     └── summary.ts         # Summary 解析 / 下载工具
 paperreader.toml.example   # 配置模板（复制为 paperreader.toml 后填写）
@@ -124,8 +123,9 @@ paperreader.toml.example   # 配置模板（复制为 paperreader.toml 后填写
 |---|---|---|---|
 | api_base | PAPERREADER_API_BASE | 智谱开放平台 | OpenAI 兼容端点 |
 | api_key | PAPERREADER_API_KEY | — | API 密钥 |
-| model | PAPERREADER_MODEL | glm-4.5 | 建议思考型模型 |
+| model | PAPERREADER_MODEL | glm-4.5 | 建议思考型模型；须与所选网关的模型 ID 一致 |
 | proxy | — | 空 | 出站 HTTP 代理（如 `http://127.0.0.1:10808`） |
+| extra_headers | PAPERREADER_EXTRA_HEADERS（JSON） | 空 | 附加请求头；OpenCode 网关会话头按域名自动附加，其余网关无需特判 |
 | max_chars | PAPERREADER_MAX_CHARS | 200000 | 送入 LLM 的最大字符数（超出保留首 70% + 尾 30%） |
 | timeout | PAPERREADER_TIMEOUT | 900 | API 超时（秒） |
 | papers_dir | PAPERREADER_PAPERS_DIR | `<项目根>/papers` | 论文目录 |
@@ -139,15 +139,16 @@ paperreader.toml.example   # 配置模板（复制为 paperreader.toml 后填写
 |---|---|---|
 | GET | `/api/papers` | 论文列表 + 已读/未读统计 |
 | GET | `/api/papers/{stem}/summary` | 获取 summary markdown（已剥离推理过程） |
-| POST | `/api/papers/{stem}/summarize?force=` | 生成/重新生成 summary |
-| POST | `/api/papers/{stem}/summarize/stream` | SSE 流式生成（`data: {type: delta/done/error}`） |
+| POST | `/api/papers/{stem}/summarize?force=` | 生成/重新生成 summary（非流式，解析失败自动修复一轮） |
+| POST | `/api/papers/{stem}/summarize/stream` | **已废弃**（410）：Summary 改为一次性生成 |
 | DELETE | `/api/papers/{stem}/summary` | 删除 summary（标记未读） |
 | GET | `/api/papers/{stem}/text` | 提取的 PDF 全文（含分页标记） |
 | GET | `/api/papers/{stem}/pdf` | PDF 原文件（`Content-Disposition: inline`） |
 | POST | `/api/papers/{stem}/chat` | 论文问答（一次性返回） |
 | POST | `/api/papers/{stem}/chat/stream` | SSE 流式问答 |
+| POST | `/api/papers/{stem}/related-questions` | 关联追问（基于最近一轮问答生成 3 个后续问题，失败返回空） |
 | GET | `/api/meta` | 全部论文元信息（星标/笔记） |
-| PUT | `/api/papers/{stem}/meta` | 更新星标 / 手写笔记 / 摘录 / 整理笔记 |
+| PUT | `/api/papers/{stem}/meta` | 更新收藏 / 手写笔记 / 摘录 / 整理笔记 |
 | POST | `/api/papers/{stem}/digest-clips` | 摘录整理（`prior` 传已有笔记时做融合整理） |
 | POST | `/api/papers/{stem}/redigest` | 重新整理某篇笔记 |
 | POST | `/api/papers/import` | URL 导入论文（支持 arXiv 链接自动转换） |

@@ -26,7 +26,8 @@ def test_extract_truncation_keeps_head_and_tail(tmp_path, make_pdf):
     out = extract_text(pdf, max_chars=3_000)
     assert out.truncated is True
     assert out.chars > 3_000
-    assert out.text.startswith("line 000")
+    assert out.text.startswith("【第 1 页】")  # 第 4 轮起每页文本带页码标记
+    assert "line 000" in out.text
     assert "line 199" in out.text  # 尾部保留（结论通常在文末）
     assert "已截断" in out.text
 

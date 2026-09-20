@@ -208,22 +208,23 @@ export async function streamChat(
   );
 }
 
-/** 流式生成 Summary：onDelta 接收原始增量（生成预览），完成返回渲染后的 markdown。 */
-export async function streamSummary(
+/** 关联追问：基于最近一轮问答生成可点击的后续问题（失败/为空返回 []）。 */
+export async function relatedQuestions(
   stem: string,
-  force: boolean,
-  onDelta: (text: string) => void
-): Promise<SummarizeResponse> {
-  let result: SummarizeResponse | null = null;
-  await readSSE(
-    await fetch(paperUrl(stem, `/summarize/stream?force=${force}`), {
-      method: "POST",
-    }),
-    (evt) => {
-      if (evt.type === "delta") onDelta(String(evt.text ?? ""));
-      else if (evt.type === "done") result = evt as unknown as SummarizeResponse;
-    }
-  );
-  if (!result) throw new Error("生成流意外结束，请重试");
-  return result;
+  question: string,
+  answer: string
+): Promise<string[]> {
+  try {
+    const data = await handle<{ questions: unknown }>(
+      await fetch(paperUrl(stem, "/related-questions"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, answer }),
+      })
+    );
+    if (!Array.isArray(data.questions)) return [];
+    return data.questions.map(String).filter((q) => q.trim());
+  } catch {
+    return []; // 增强功能：静默降级
+  }
 }

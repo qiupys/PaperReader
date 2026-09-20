@@ -68,9 +68,19 @@ export interface NoteDigest {
   text: string;
 }
 
+/** 手写笔记卡片（与摘录类似：多条、可编辑、可删除）。 */
+export interface ManualNote {
+  id: string;
+  ts: string;
+  text: string;
+}
+
 export interface PaperMeta {
   starred: boolean;
+  /** 旧版单条手写笔记（历史数据），仅用于兼容展示；新数据一律写入 notes。 */
   note: string;
+  /** 手写笔记卡片列表。 */
+  notes?: ManualNote[];
   clips: ChatClip[];
   digests: NoteDigest[];
 }
@@ -78,6 +88,7 @@ export interface PaperMeta {
 export interface PaperMetaUpdate {
   starred?: boolean;
   note?: string;
+  notes?: ManualNote[];
   clips?: ChatClip[];
   digests?: NoteDigest[];
 }

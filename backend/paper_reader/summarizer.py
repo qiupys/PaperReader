@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from openai import OpenAI
@@ -47,7 +49,7 @@ USER_PROMPT_TEMPLATE = """请阅读以下论文全文，输出一个 JSON 对象
   "agent_reflection": "你作为阅读 agent 的批判性思考：用分组要点呈现——优点、不足、贡献是否显著与实验证据是否充分、适合哪些读者、值得延伸阅读的相关方向"
 }}
 
-注意：各字段的内容请分段/分点组织（可用 Markdown 语法），保持段落与层次，不要把所有内容挤进单一长段落；JSON 字符串内的换行必须转义。
+注意：各字段的内容请分段/分点组织（可用 Markdown 语法），保持段落与层次，不要把所有内容挤进单一长段落；JSON 字符串内的换行必须转义。不要在内容中输出 [p.N] 之类的页码标注。
 
 === 论文全文开始 ===
 {paper_text}
@@ -68,6 +70,37 @@ class PaperSummary:
     experiments: str = ""
     conclusion: str = ""
     agent_reflection: str = ""
+
+    def has_content(self) -> bool:
+        """摘要/方案/实验/结论四大内容字段是否至少有一个非空。"""
+        return any(
+            (getattr(self, f) or "").strip()
+            for f in ("abstract", "core_method", "experiments", "conclusion")
+        )
+
+
+# Summary 落盘前的完整性要求：核心内容字段全非空，否则视为失败（论文保持未读）
+REQUIRED_FIELDS = ("abstract", "core_method", "experiments", "conclusion")
+REQUIRED_LABELS = {
+    "abstract": "摘要",
+    "core_method": "核心技术方案",
+    "experiments": "实验效果",
+    "conclusion": "结论",
+}
+
+
+def ensure_complete(summary: PaperSummary) -> None:
+    """校验核心内容字段全部非空；缺失即抛错（调用方不得将空章节落盘为已读）。"""
+    missing = [
+        REQUIRED_LABELS[f]
+        for f in REQUIRED_FIELDS
+        if not (getattr(summary, f) or "").strip()
+    ]
+    if missing:
+        raise SummarizeError(
+            "生成结果不完整（缺少：" + "、".join(missing) + "），已放弃保存；"
+            "论文保持未读，请重试或更换模型"
+        )
 
 
 @dataclass
@@ -96,25 +129,7 @@ def _normalize_str_list(value: object) -> list[str]:
     return []
 
 
-def parse_summary(content: str) -> PaperSummary:
-    """从模型输出解析 JSON（容忍代码块包裹与前后多余文本）。"""
-    text = content.strip()
-    text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
-    text = re.sub(r"\s*```\s*$", "", text)
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end <= start:
-        raise SummarizeError(
-            f"模型输出中未找到 JSON 对象。原始输出前 500 字：\n{content[:500]}"
-        )
-    try:
-        data = json.loads(text[start : end + 1])
-    except json.JSONDecodeError as e:
-        raise SummarizeError(
-            f"模型输出 JSON 解析失败: {e}\n原始输出前 500 字：\n{content[:500]}"
-        ) from e
-    if not isinstance(data, dict):
-        raise SummarizeError("模型输出的 JSON 不是对象")
-
+def _summary_from_data(data: dict) -> PaperSummary:
     title = str(data.get("title") or "").strip() or "Untitled"
     return PaperSummary(
         title=title,
@@ -130,6 +145,70 @@ def parse_summary(content: str) -> PaperSummary:
             data.get("agent_reflection") or data.get("reflection") or ""
         ).strip(),
     )
+
+
+def parse_summary(content: str) -> PaperSummary:
+    """从模型输出解析 JSON（容忍代码块包裹、前后多余文本、尾逗号与多余花括号）。
+
+    用 ``JSONDecoder.raw_decode`` 从每个 ``{`` 起点尝试解码：天然忽略 JSON
+    后面粘连的多余文本，也不受字符串内花括号影响。只含元信息、内容字段
+    （摘要/方案/实验/结论）全空的对象（典型：输出被截断后只剩元信息）不算
+    解析成功，继续尝试其他起点；全部失败才报错。
+    """
+    text = content.strip()
+    text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+    text = re.sub(r"\s*```\s*$", "", text)
+    if "{" not in text:
+        raise SummarizeError(
+            f"模型输出中未找到 JSON 对象。原始输出前 500 字：\n{content[:500]}"
+        )
+    # 模型常见小毛病：数组/对象末尾多一个逗号
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    decoder = json.JSONDecoder()
+    last_err = "未找到内容非空的 JSON 对象"
+    for m in re.finditer(r"{", text):
+        try:
+            data, _ = decoder.raw_decode(text, m.start())
+        except json.JSONDecodeError as e:
+            last_err = str(e)
+            continue
+        if not isinstance(data, dict):
+            continue
+        parsed = _summary_from_data(data)
+        if parsed.has_content():
+            return parsed
+        last_err = "解析结果内容字段全为空（疑似输出被截断）"
+    raise SummarizeError(
+        f"模型输出 JSON 解析失败（可能被截断）：{last_err}\n原始输出前 500 字：\n{content[:500]}"
+    )
+
+
+def repair_summary_json(
+    cfg: Config, raw: str, client: OpenAI | None = None
+) -> PaperSummary:
+    """解析失败后的自动修复：把损坏的模型输出交回 LLM 修正为合法 JSON 再解析。"""
+    if client is None:
+        client = build_client(cfg)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是 JSON 修复器。用户给出的 JSON 已损坏（可能被截断或格式错误），"
+                "请修复为完整合法的 JSON 对象并只输出该 JSON，"
+                "不要任何解释、不要 markdown 代码块标记。"
+                "保留原有字段与内容；无法恢复的字段补空字符串或空数组。"
+            ),
+        },
+        {"role": "user", "content": raw[:20000]},
+    ]
+    try:
+        resp = call_llm(client, model=cfg.model, messages=messages)
+        text = (resp.choices[0].message.content or "").strip()
+    except Exception as e:  # noqa: BLE001
+        raise SummarizeError(f"JSON 自动修复请求失败：{e}") from e
+    if not text:
+        raise SummarizeError("JSON 自动修复返回为空")
+    return parse_summary(text)
 
 
 def _q(value: str) -> str:
@@ -228,20 +307,40 @@ def strip_reasoning(markdown: str) -> str:
     return cleaned.rstrip() + "\n" if cleaned.strip() else cleaned
 
 
-def build_client(cfg: Config) -> OpenAI:
-    """按配置构造 OpenAI 兼容客户端（含 User-Agent / 会话头 / 可选代理）。
+def _is_opencode_base(api_base: str) -> bool:
+    """判断端点是否为 OpenCode 网关（其要求客户端提供会话 ID 头）。
 
+    仅按域名识别，其他 OpenAI 兼容网关不附加任何专属头。
+    """
+    try:
+        host = urlparse(api_base).hostname or ""
+    except ValueError:
+        return False
+    return "opencode" in host.lower()
+
+
+def build_client(cfg: Config) -> OpenAI:
+    """按配置构造 OpenAI 兼容客户端（含可选代理与附加请求头）。
+
+    标准接入只需 api_base + api_key + model 三项；网关专属头按域名自动附加
+    （目前仅 OpenCode），cfg.extra_headers 可配置任意附加头且优先级最高。
     同一配置复用客户端实例：省去每次请求重建连接池 / TLS 握手的开销。
     """
-    key = (cfg.api_base, cfg.api_key, _normalize_proxy(cfg.proxy), cfg.timeout)
+    headers_extra = {str(k): str(v) for k, v in (cfg.extra_headers or {}).items()}
+    key = (
+        cfg.api_base,
+        cfg.api_key,
+        _normalize_proxy(cfg.proxy),
+        cfg.timeout,
+        tuple(sorted(headers_extra.items())),
+    )
     cached = _CLIENT_CACHE.get(key)
     if cached is not None:
         return cached
-    # 部分 OpenAI 兼容网关（如 OpenCode Go）要求客户端标识自身并提供会话 ID
-    default_headers = {
-        "User-Agent": USER_AGENT,
-        "x-opencode-session": _SESSION_ID,
-    }
+    default_headers: dict[str, str] = {"User-Agent": USER_AGENT}
+    if _is_opencode_base(cfg.api_base):
+        default_headers["x-opencode-session"] = _SESSION_ID
+    default_headers.update(headers_extra)
     proxy = _normalize_proxy(cfg.proxy)
     http_client = None
     if proxy:
@@ -257,6 +356,40 @@ def build_client(cfg: Config) -> OpenAI:
         _CLIENT_CACHE.clear()
     _CLIENT_CACHE[key] = client
     return client
+
+
+# 上游 LLM API 偶发 5xx/网络抖动时的重试参数：最多 3 次尝试（1 次原始 + 2 次重试）
+LLM_MAX_ATTEMPTS = 3
+LLM_RETRY_BASE_DELAY = 1.0
+
+
+def _is_retryable_llm_error(exc: Exception) -> bool:
+    """判断 LLM 调用异常是否值得重试。
+
+    - 带 HTTP 状态码：仅 5xx（上游内部错误）与 429（限流）重试；
+      4xx 的参数/鉴权/内容类错误重试也不会成功，直接抛出。
+    - 不带状态码（连接失败、超时等网络异常）：重试。
+    """
+    status = getattr(exc, "status_code", None)
+    return status is None or status == 429 or status >= 500
+
+
+def call_llm(client: OpenAI, *, model: str, messages: list[dict]):
+    """调用 chat completions，对上游瞬时错误（5xx/429/网络异常）做指数退避重试。
+
+    所有非流式 LLM 调用统一走这里；重试仍失败时抛出最后一次的原始异常，
+    由各调用方按自身语义包装（SummarizeError / ChatError / 静默降级）。
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
+        try:
+            return client.chat.completions.create(model=model, messages=messages)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if not _is_retryable_llm_error(exc) or attempt == LLM_MAX_ATTEMPTS:
+                raise
+            time.sleep(LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+    raise last_exc  # pragma: no cover —— 循环内必 return 或 raise，此处仅类型收窄
 
 
 def summarize_pdf(
@@ -280,7 +413,7 @@ def summarize_pdf(
         {"role": "user", "content": build_user_prompt(extracted.text, pdf_path.name)},
     ]
     try:
-        resp = client.chat.completions.create(model=cfg.model, messages=messages)
+        resp = call_llm(client, model=cfg.model, messages=messages)
     except Exception as e:  # noqa: BLE001
         raise SummarizeError(f"调用 LLM API 失败: {e}") from e
 
@@ -292,7 +425,13 @@ def summarize_pdf(
     if not content.strip():
         raise SummarizeError("模型返回内容为空，可尝试重试或更换模型")
 
-    parsed = parse_summary(content)
+    # 解析失败自动修复一轮（截断 / 多余文本 / 格式错误），修复仍失败才报错
+    try:
+        parsed = parse_summary(content)
+    except SummarizeError:
+        parsed = repair_summary_json(cfg, content, client=client)
+    # 内容不完整（核心字段缺失）视为失败：不落盘，论文保持未读
+    ensure_complete(parsed)
     markdown = render_markdown(
         parsed, reasoning=reasoning, model=cfg.model, source_pdf=pdf_path.name
     )
