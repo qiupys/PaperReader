@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# 系统
+.DS_Store
+
+# 论文 PDF 属于下载产物，只跟踪 summaries/（如需入库可删除此行）
+papers/**/*.pdf
+
+# 本地配置（可能含 API Key）
+paperreader.toml
+.env
+
+# 个人使用数据（星标 / 笔记 / 对话摘录）
+paperreader_meta.json
+
+# 生成的 Summary 属于个人使用产物，不入库（结构由 .gitkeep 保留）
+summaries/*
+!summaries/.gitkeep
+
+# WorkBuddy 等本地工具目录
+.workbuddy/
