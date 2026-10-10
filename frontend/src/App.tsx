@@ -140,12 +140,42 @@ function metaChips(label: string, value: string): string[] {
   return parts.length > 0 ? parts : [value];
 }
 
+/** 超长作者列表：默认折叠为两行，可展开全部（DeepSeek 这类 200+ 作者的论文）。 */
+function FoldableMetaRow({ label, chips }: { label: string; chips: string[] }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="meta-row">
+      <span className="meta-label">{label}</span>
+      <span className="meta-value meta-value-fold">
+        <span className={`meta-chips${expanded ? " expanded" : ""}`}>
+          {chips.map((chip) => (
+            <span key={chip} className="meta-chip">
+              {chip}
+            </span>
+          ))}
+        </span>
+        <button
+          type="button"
+          className="meta-toggle"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? "收起" : `展开全部 ${chips.length} 位作者`}
+        </button>
+      </span>
+    </div>
+  );
+}
+
 function MetaRow({ label, value }: { label: string; value: string }) {
+  const chips = metaChips(label, value);
+  if (label === "作者" && chips.length > 12) {
+    return <FoldableMetaRow label={label} chips={chips} />;
+  }
   return (
     <div className="meta-row">
       <span className="meta-label">{label}</span>
       <span className="meta-value">
-        {metaChips(label, value).map((chip) => (
+        {chips.map((chip) => (
           <span key={chip} className="meta-chip">
             {chip}
           </span>

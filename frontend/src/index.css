@@ -534,6 +534,9 @@ body,
 .detail-head {
   padding: 16px 24px 0;
   flex: none;
+  /* 兜底：极端超长的元信息也不会压垮布局，头部内部可滚动 */
+  max-height: 46vh;
+  overflow-y: auto;
 }
 .detail-title-row {
   display: flex;
@@ -606,6 +609,40 @@ body,
   font-size: 12px;
   color: var(--text-2);
   white-space: nowrap;
+}
+
+/* 可折叠的元信息行（超长作者列表） */
+.meta-value-fold {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+.meta-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 3.6em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(180deg, #000 55%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 55%, transparent 100%);
+}
+.meta-chips.expanded {
+  max-height: none;
+  overflow: visible;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+.meta-toggle {
+  align-self: flex-start;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  padding: 1px 0;
+  cursor: pointer;
+}
+.meta-toggle:hover {
+  text-decoration: underline;
 }
 
 /* ---------- toolbar ---------- */
