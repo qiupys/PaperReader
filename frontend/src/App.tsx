@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import ChatPanel from "./ChatPanel";
+import ModelPicker from "./ModelPicker";
 import NotesPanel from "./NotesPanel";
 import { Markdown } from "./Markdown";
 import { IconDownload } from "./icons";
 import {
   deleteSummary,
   fetchMetas,
+  fetchModels,
   fetchPapers,
   fetchSummary,
   importPaper,
   paperUrl,
   searchFulltext,
   generateSummary,
+  setModel,
   updatePaperMeta,
 } from "./api";
 import { downloadText, formatDate, formatSize, parseSummary } from "./summary";
@@ -39,6 +42,7 @@ const TABS: Array<{ key: TabKey; label: string }> = [
 
 const EMPTY_META: PaperMeta = { starred: false, note: "", clips: [], digests: [] };
 const THEME_KEY = "paperreader-theme";
+const MODEL_KEY = "paperreader-model";
 
 /* ---------- 迷你图标（16px 线性风格） ---------- */
 
@@ -217,6 +221,61 @@ export default function App() {
   const [importUrl, setImportUrl] = useState("");
   const [importing, setImporting] = useState(false);
   const [importMsg, setImportMsg] = useState<{ type: "ok" | "error"; text: string } | null>(null);
+
+  // ---------- 模型选择：启动时拉取网关模型列表，选择持久化到 localStorage ----------
+  const [models, setModels] = useState<string[]>([]);
+  const [model, setModelState] = useState<string>("");
+  const [modelErr, setModelErr] = useState(false);
+  const [loadingModels, setLoadingModels] = useState(true);
+
+  const loadModels = useCallback(async (attempt = 0, refresh = false) => {
+    setLoadingModels(true);
+    try {
+      const d = await fetchModels(refresh);
+      setModels(d.models);
+      setModelErr(false);
+      let target = d.current;
+      try {
+        const saved = localStorage.getItem(MODEL_KEY);
+        if (saved && d.models.includes(saved)) target = saved;
+      } catch {
+        /* ignore */
+      }
+      setModelState(target);
+      if (target !== d.current) {
+        void setModel(target).catch(() => undefined);
+      }
+    } catch {
+      // 后端未就绪（如刚启动）时自动重试几次
+      if (attempt < 4) {
+        setTimeout(() => void loadModels(attempt + 1, refresh), 2000);
+      } else {
+        setModelErr(true);
+      }
+    } finally {
+      setLoadingModels(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadModels();
+  }, [loadModels]);
+
+  const changeModel = async (m: string) => {
+    const prev = model;
+    setModelState(m);
+    try {
+      localStorage.setItem(MODEL_KEY, m);
+    } catch {
+      /* ignore */
+    }
+    try {
+      await setModel(m);
+    } catch (e) {
+      setModelState(prev);
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -477,6 +536,16 @@ export default function App() {
 
       <div className="layout">
         <aside className="sidebar">
+          <div className="model-row-wrap">
+            <ModelPicker
+              models={models}
+              model={model}
+              loading={loadingModels}
+              error={modelErr}
+              onPick={(m) => void changeModel(m)}
+              onRefresh={() => void loadModels(0, true)}
+            />
+          </div>
           <div className="filter-row">
             {FILTERS.map((f) => (
               <button

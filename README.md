@@ -13,6 +13,8 @@
 | 📥 URL 一键导入 | 粘贴 arXiv / PDF 链接自动下载入库（`/abs/` 链接自动转 PDF 直链；重名 409、非 PDF 422） |
 | 📄 对照阅读 | 左侧内嵌 PDF 原文、右侧分章节彩色卡片式 Summary |
 | 🤖 AI Summary | 摘要 / 核心技术方案 / 实验效果 / 结论 / **Agent 思考**；一次性生成（非流式），解析失败自动修复，杜绝空章节 |
+| 🎛 模型选择器 | 侧栏顶部下拉框实时拉取网关可用模型，选择即生效（Summary 与对话共用），前端持久化 |
+| 🆓 免费模型模式 | 通过本地转换层借用 opencode 客户端身份，直接调用 opencode Zen 免费档模型（无需订阅/API Key） |
 | 💬 流式对话 | 基于论文全文的多轮问答，回答打字机式实时显示；未读论文直接提问会先生成 Summary 再回答，回答后给出可点击的关联追问 |
 | 🗂 对话式笔记 | 回答一键存为摘录 → AI 将「已有笔记 + 新摘录」融合整理成一篇（章节注明来源）；可整篇重新整理；整理完成后自动清空摘录与手写笔记卡片 |
 | ✎ 手写笔记 | 卡片式手写想法：多条、可编辑、可删除；草稿输入即自动暂存，点「保存」生成卡片 |
@@ -24,6 +26,15 @@
 > 思考型模型的「原始推理过程」只写入 `summaries/*.md` 存档，Web 界面与对话均不展示（API 返回前已剥离）。
 
 ## 快速开始
+
+### 0. Windows 一键启动（推荐）
+
+双击仓库根目录的 **`start_paperreader.bat`**（放在仓库根或其上一级目录均可，自动定位）：
+
+- 首次运行自动完成 `uv sync`（后端）与 `npm install + build`（前端）
+- 自动拉起 **免费模型转换层**（端口 8766）与 opencode serve（4096）
+- 等服务就绪后自动打开浏览器（http://127.0.0.1:8765）
+- 关闭窗口即停止服务；日志见 `logs/`
 
 ### 1. 后端（Python ≥ 3.11）
 
@@ -79,21 +90,26 @@ uv run paper serve                   # 启动 API + Web 服务
 ## 项目结构
 
 ```
+start_paperreader.bat      # Windows 一键启动（自动初始化 + 三件套 + 打开浏览器）
+scripts/
+└── zen_free_shim.py       # 免费模型转换层：OpenAI 兼容接口 -> opencode serve（含超时保护）
+logs/                      # 运行日志（zen_free_shim.log / opencode_serve.log，gitignore）
 papers/                    # 论文库（把 PDF 放这里，支持子目录；PDF 不入库）
 summaries/                 # Summary 库（.md 与 PDF 同名对应；不入库）
 backend/                   # Python：提取 / 生成 / 对话 / CLI / API 服务
 ├── paper_reader/
-│   ├── config.py          # 配置（env > 项目 toml > 用户 toml > 默认值）
+│   ├── config.py          # 配置（env > 项目 toml > 用户 toml > 默认值；支持前端运行时覆盖 model）
 │   ├── library.py         # 扫描论文库，判定已读/未读
 │   ├── extract.py         # PDF 文本提取（pypdf，带【第 N 页】分页标记 + 缓存）
 │   ├── summarizer.py      # LLM 调用 + Agent 思考捕获 + Markdown 渲染
 │   ├── chat.py            # 论文对话 / 摘录整理（含流式与提示词模板）
 │   ├── cli.py             # CLI 入口（typer）
-│   └── server.py          # FastAPI REST/SSE API（供 Web 使用）
+│   └── server.py          # FastAPI REST/SSE API（供 Web 使用；含 /api/models 模型列表）
 └── tests/
 frontend/                  # TypeScript + React（Vite）
 └── src/
-    ├── App.tsx            # 布局 / 侧栏 / 对照阅读 / 导入 / 搜索 / 主题
+    ├── App.tsx            # 布局 / 侧栏（含模型选择器）/ 对照阅读 / 导入 / 搜索 / 主题
+    ├── ModelPicker.tsx    # 自定义模型下拉：可搜索、当前项高亮、动态刷新
     ├── ChatPanel.tsx      # 流式对话（先摘要后回答、关联追问、状态按论文跟踪）
     ├── NotesPanel.tsx     # 笔记：已整理 / 摘录 / 手写 / 导出
     ├── Markdown.tsx       # 通用 Markdown 渲染（对话 / Summary / 笔记共用）
@@ -132,6 +148,27 @@ paperreader.toml.example   # 配置模板（复制为 paperreader.toml 后填写
 | summaries_dir | PAPERREADER_SUMMARIES_DIR | `<项目根>/summaries` | Summary 目录 |
 
 项目根的探测：从运行目录向上查找 `paperreader.toml` 或 `papers/` 目录，CLI 在任意子目录运行均可。
+
+**运行时切换模型**：Web 界面侧栏顶部的模型选择器可实时切换（覆盖 toml 的 `model` 配置，进程内生效，重启后回到 toml 配置）。选择持久化在浏览器 localStorage，刷新页面自动应用。
+
+## 免费模型模式（opencode Zen）
+
+无需 API Key / 订阅，可直接使用 opencode Zen 网关的免费档模型（`-free` 后缀，如 `mimo-v2.6-flash-free`）。
+
+原理：Zen 免费档限制「只能从 opencode 客户端内部调用」，因此由本地转换层借用 opencode 的客户端身份转发请求：
+
+```
+PaperReader (8765)
+   └─> 转换层 scripts/zen_free_shim.py (8766，OpenAI 兼容接口)
+         └─> opencode serve (4096)
+               └─> https://opencode.ai/zen/v1  （免费模型）
+```
+
+- **启动**：`start_paperreader.bat` 会自动拉起转换层与 opencode serve；也可手动 `python scripts/zen_free_shim.py`
+- **配置**：`paperreader.toml` 里 `api_base = "http://127.0.0.1:8766/v1"`、`api_key` 任意占位、`proxy = ""`（转换层自行处理出站代理）
+- **模型列表**：前端下拉框从网关动态拉取（缓存 5 分钟，可点刷新强制更新）；网关不可达时自动回退内置列表
+- **超时保护**：单次调用限时 300 秒（环境变量 `OC_CALL_TIMEOUT` 可调），超时自动取消并清理 opencode 会话，返回 504，后端会自动重试
+- **注意事项**：免费档上游偶发拥堵/限流，速度波动属正常；恢复 Zen Go 订阅后把 toml 改回订阅端点即可直连
 
 ## REST / SSE API（`paper serve`，默认 127.0.0.1:8765）
 

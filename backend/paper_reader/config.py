@@ -145,7 +145,24 @@ def load_config() -> Config:
         cfg.papers_dir = _detect_root() / "papers"
     if cfg.summaries_dir is None:
         cfg.summaries_dir = cfg.papers_dir.parent / "summaries"
+    # 运行时模型覆盖（前端模型选择器），优先级最高
+    if _model_override:
+        cfg.model = _model_override
     return cfg
+
+
+# ---------- 运行时模型覆盖（Web 前端「模型选择器」用，进程内生效） ----------
+
+_model_override: str | None = None
+
+
+def get_model_override() -> str | None:
+    return _model_override
+
+
+def set_model_override(model: str | None) -> None:
+    global _model_override
+    _model_override = (model or "").strip() or None
 
 
 def mask_key(key: str) -> str:

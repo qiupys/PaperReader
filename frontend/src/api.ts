@@ -38,6 +38,32 @@ export async function fetchPapers(): Promise<PapersResponse> {
   return handle<PapersResponse>(await fetch("/api/papers"));
 }
 
+// ---------- 模型选择 ----------
+
+export async function fetchModels(refresh = false): Promise<{
+  models: string[];
+  current: string;
+  models_source: string;
+  warning?: string;
+}> {
+  const qs = refresh ? "?refresh=1" : "";
+  return handle(await fetch(`/api/models${qs}`));
+}
+
+export async function fetchCurrentModel(): Promise<{ model: string }> {
+  return handle(await fetch("/api/model"));
+}
+
+export async function setModel(model: string): Promise<{ model: string }> {
+  return handle(
+    await fetch("/api/model", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    })
+  );
+}
+
 export async function fetchSummary(stem: string): Promise<SummaryResponse> {
   return handle<SummaryResponse>(await fetch(paperUrl(stem, "/summary")));
 }

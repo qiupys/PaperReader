@@ -27,3 +27,8 @@ summaries/*
 
 # WorkBuddy 等本地工具目录
 .workbuddy/
+
+# 转换层运行时产物（日志 / opencode serve 工作目录）
+logs/
+oc_workspace/
+*.log

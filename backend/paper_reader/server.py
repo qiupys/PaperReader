@@ -20,7 +20,7 @@ from .chat import (
     digest_notes,
     generate_related_questions,
 )
-from .config import Config, load_config
+from .config import Config, get_model_override, load_config, set_model_override
 from .extract import ExtractionError, extract_text
 from .library import PaperInfo, find_paper, scan
 from .summarizer import (
@@ -133,6 +133,73 @@ def _paper_dict(p: PaperInfo) -> dict:
 @router.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+class ModelUpdate(BaseModel):
+    model: str = Field(min_length=1)
+
+
+# 网关拉不到列表时的内置回退（与转换层 scripts/zen_free_shim.py 的回退一致）
+FALLBACK_FREE_MODELS = [
+    "mimo-v2.6-flash-free",
+    "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+    "longcat-2.5-preview-free",
+    "ling-3.0-flash-fin-free",
+    "muse-spark-1.3-contributor-free",
+    "space-bunny-free",
+]
+
+
+@router.get("/models")
+def list_models(refresh: bool = False) -> dict:
+    """可用模型列表：从 LLM 网关的 /models 拉取（OpenAI 兼容）。
+
+    网关临时不可达时返回内置回退列表（models_source=fallback），
+    保证前端下拉框始终可用。
+    """
+    cfg = load_config()
+    base = cfg.api_base.rstrip("/")
+    try:
+        import httpx
+
+        headers = {}
+        if cfg.api_key:
+            headers["Authorization"] = f"Bearer {cfg.api_key}"
+        params = {"refresh": "1"} if refresh else None
+        resp = httpx.Client(
+            trust_env=False, timeout=15.0, headers=headers
+        ).get(f"{base}/models", params=params)
+        resp.raise_for_status()
+        data = resp.json()
+        ids = sorted(
+            m.get("id") if isinstance(m, dict) else str(m)
+            for m in data.get("data", [])
+        )
+        ids = [i for i in ids if i]
+        if not ids:
+            raise RuntimeError("网关返回空列表")
+        return {"models": ids, "current": cfg.model, "models_source": "gateway"}
+    except Exception as e:  # noqa: BLE001
+        return {
+            "models": FALLBACK_FREE_MODELS,
+            "current": cfg.model,
+            "models_source": "fallback",
+            "warning": f"模型列表拉取失败，已使用内置列表：{e}",
+        }
+
+
+@router.get("/model")
+def get_model() -> dict:
+    """当前生效的模型（toml 配置或前端运行时覆盖）。"""
+    return {"model": load_config().model, "override": get_model_override()}
+
+
+@router.put("/model")
+def update_model(body: ModelUpdate) -> dict:
+    """运行时切换模型（覆盖 toml 配置，进程内生效，重启后回到 toml 配置）。"""
+    set_model_override(body.model)
+    return {"model": load_config().model}
 
 
 @router.get("/papers")
